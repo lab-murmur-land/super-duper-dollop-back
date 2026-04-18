@@ -1,5 +1,5 @@
 const express = require('express');
-const { register, login, getProfileTopics, getProfilePosts } = require('../controllers/authController');
+const { register, login, logout, getProfileTopics, getProfilePosts } = require('../controllers/authController');
 const { verifyCaptcha } = require('../middlewares/captchaMiddleware');
 const { verifyToken } = require('../middlewares/authMiddleware');
 
@@ -16,6 +16,12 @@ router.post('/register', verifyCaptcha, register);
  * @desc    Login via UID, Password and reCAPTCHA to get JWT
  */
 router.post('/login', verifyCaptcha, login);
+
+/**
+ * @route   POST /auth/logout
+ * @desc    Logout user by clearing currentJwt
+ */
+router.post('/logout', verifyToken, logout);
 
 /**
  * @route   GET /auth/profile/topics

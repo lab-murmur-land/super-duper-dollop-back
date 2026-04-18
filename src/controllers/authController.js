@@ -82,4 +82,17 @@ const getProfilePosts = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, getProfileTopics, getProfilePosts };
+const logout = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ uid: req.user.uid });
+    if (user) {
+      user.currentJwt = null;
+      await user.save();
+    }
+    res.status(200).json({ message: 'Logged out successfully' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { register, login, logout, getProfileTopics, getProfilePosts };
