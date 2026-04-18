@@ -1,26 +1,13 @@
 const express = require('express');
 const { createPost, getPosts, toggleVote } = require('../controllers/postController');
 const { verifyToken } = require('../middlewares/authMiddleware');
+const { verifyCaptcha } = require('../middlewares/captchaMiddleware'); // newly added
 const upload = require('../middlewares/uploadMiddleware');
 
 const router = express.Router();
 
-/**
- * @route   POST /topics/:topicId/posts
- * @desc    Create a new post under a topic (must be authorized)
- */
-router.post('/topics/:topicId/posts', verifyToken, upload.single('file'), createPost);
-
-/**
- * @route   GET /topics/:topicId/posts
- * @desc    Get all posts for a topic. Sort by ?sort=latest or ?sort=most-vote
- */
+router.post('/topics/:topicId/posts', verifyCaptcha, verifyToken, upload.single('file'), createPost);
 router.get('/topics/:topicId/posts', getPosts);
-
-/**
- * @route   POST /votes
- * @desc    Toggle upvote/downvote for post or topic (must be authorized)
- */
-router.post('/votes', verifyToken, toggleVote);
+router.post('/votes', verifyToken, toggleVote); // no captcha required for vote based on prev plan, although we could add it
 
 module.exports = router;

@@ -1,7 +1,8 @@
-const { auth } = require('../config/firebase');
+const jwt = require('jsonwebtoken');
+const { db } = require('../config/firebase');
 
 /**
- * Middleware to verify Firebase Identity token
+ * Middleware to verify custom JWT token and DB session
  */
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -11,11 +12,32 @@ const verifyToken = async (req, res, next) => {
 
   const token = authHeader.split('Bearer ')[1];
   try {
-    const decodedToken = await auth.verifyIdToken(token);
-    req.user = decodedToken; // populate req.user with Firebase UID and claims
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const uid = decoded.uid;
+
+    if (!uid) {
+      throw new Error('Invalid token payload: Missing UID');
+    }
+
+    // Verify token against database currentJwt
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (!userDoc.exists) {
+      throw new Error('User not found');
+    }
+
+    const userData = userDoc.data();
+    if (userData.currentJwt !== token) {
+      return res.status(401).json({ error: 'INVALID_SESSION: Token superseded' });
+    }
+
+    // Populate req.user
+    req.user = { uid: uid };
     next();
   } catch (error) {
-    console.error('Error verifying auth token:', error);
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'TOKEN_EXPIRED: Token is expired' });
+    }
+    console.error('Error verifying custom token:', error.message);
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 };
