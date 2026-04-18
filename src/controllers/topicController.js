@@ -1,8 +1,5 @@
-const { db, admin } = require('../config/firebase');
+const Topic = require('../models/Topic');
 
-/**
- * Controller: Create Topic
- */
 const createTopic = async (req, res, next) => {
   try {
     const { title, content } = req.body;
@@ -12,23 +9,14 @@ const createTopic = async (req, res, next) => {
       return res.status(400).json({ error: 'Title is required' });
     }
 
-    const topicRef = db.collection('topics').doc();
-    const newTopic = {
-      id: topicRef.id,
-      title: title,
-      content: content || '', // Optional early body
-      authorId: authorId,    // Stored but stripped later
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      views: 0,
-      upvotes: 0,
-      downvotes: 0,
-      score: 0 // pre-calculating simple net score
-    };
+    const newTopic = await Topic.create({
+      title,
+      content: content || '',
+      authorId
+    });
 
-    await topicRef.set(newTopic);
-
-    // Filter out authorId before returning
-    const { authorId: _, ...publicTopic } = newTopic;
+    const publicTopic = newTopic.toObject();
+    delete publicTopic.authorId;
     publicTopic.authorName = 'Anonymous';
 
     res.status(201).json({ message: 'Topic created', data: publicTopic });
@@ -37,84 +25,61 @@ const createTopic = async (req, res, next) => {
   }
 };
 
-/**
- * Controller: Get Topics List (Supports Sorting & Searching)
- */
 const getTopics = async (req, res, next) => {
   try {
     const { sort, search, limit } = req.query;
     let queryLimit = limit ? parseInt(limit, 10) : 50;
 
-    let topicsQuery = db.collection('topics');
-
-    // 1. If Searching
-    // Real full-text search is not supported in Firestore natively. Standard "string ranges" 
-    // for starts-with search can be used if sorting by title:
+    let filter = {};
     if (search) {
-      // NOTE: Can't easily mix 'search' inequality on title and order by 'score' in Firestore directly 
-      // without complex composite indexing. 
-      // If search is provided, we filter by title boundaries (start-with logic on a field e.g., titleLower) 
-      const startText = search;
-      const endText = search + '\uf8ff';
-      topicsQuery = topicsQuery
-        .where('title', '>=', startText)
-        .where('title', '<=', endText);
-      // Fallback: If search applied, you cannot orderBy different fields easily. So we might sort on client side
-    } else {
-      // 2. Sorting (When no search applied)
+      filter.title = { $regex: search, $options: 'i' };
+    }
+
+    let sortOption = { createdAt: -1 };
+    if (!search) {
       if (sort === 'most-vote') {
-        topicsQuery = topicsQuery.orderBy('score', 'desc');
+        sortOption = { score: -1 };
       } else if (sort === 'most-view') {
-        topicsQuery = topicsQuery.orderBy('views', 'desc');
-      } else {
-        // default latest
-        topicsQuery = topicsQuery.orderBy('createdAt', 'desc');
+        sortOption = { views: -1 };
       }
     }
 
-    topicsQuery = topicsQuery.limit(queryLimit);
-    const snapshot = await topicsQuery.get();
+    const topics = await Topic.find(filter)
+      .sort(sortOption)
+      .limit(queryLimit)
+      .lean();
 
-    const topics = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      const { authorId, ...safeData } = data; // Strip author info
-      topics.push({
-        ...safeData,
-        authorName: 'Anonymous'
-      });
+    const publicTopics = topics.map(topic => {
+      delete topic.authorId;
+      return { ...topic, authorName: 'Anonymous' };
     });
 
-    res.status(200).json({ data: topics });
+    res.status(200).json({ data: publicTopics });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * Controller: Get Single Topic and Increment Views
- */
 const getTopicById = async (req, res, next) => {
   try {
     const topicId = req.params.id;
-    const topicRef = db.collection('topics').doc(topicId);
-    
-    // We update atomically if possible
-    await topicRef.update({
-      views: admin.firestore.FieldValue.increment(1)
-    });
 
-    const topicSnap = await topicRef.get();
-    if (!topicSnap.exists) {
+    // findByIdAndUpdate to increment views atomically
+    const topic = await Topic.findByIdAndUpdate(
+      topicId,
+      { $inc: { views: 1 } },
+      { new: true }
+    ).lean();
+
+    if (!topic) {
       return res.status(404).json({ error: 'Topic not found' });
     }
 
-    const data = topicSnap.data();
-    const { authorId, ...safeData } = data; // Safe version
-
+    delete topic.authorId;
+    
     res.status(200).json({ 
       data: { 
-        ...safeData, 
+        ...topic, 
         authorName: 'Anonymous' 
       }
     });

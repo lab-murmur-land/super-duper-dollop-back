@@ -1,8 +1,7 @@
-const { db, admin, storage } = require('../config/firebase');
+const Post = require('../models/Post');
+const Topic = require('../models/Topic');
+const Vote = require('../models/Vote');
 
-/**
- * Controller: Create a Post directly under a Topic
- */
 const createPost = async (req, res, next) => {
   try {
     const { topicId } = req.params;
@@ -13,45 +12,25 @@ const createPost = async (req, res, next) => {
     if (!topicId) return res.status(400).json({ error: 'Topic ID is required' });
     if (!content && !file) return res.status(400).json({ error: 'Content or file is required' });
 
-    // Validate if topic exists
-    const topicRef = db.collection('topics').doc(topicId);
-    const topicSnap = await topicRef.get();
-    if (!topicSnap.exists) {
+    const topicExists = await Topic.findById(topicId);
+    if (!topicExists) {
       return res.status(404).json({ error: 'Topic not found' });
     }
 
     let fileUrl = null;
     if (file) {
-      // Create unique name
-      const fileName = `posts/${Date.now()}_${file.originalname}`;
-      const bucket = storage.bucket();
-      const fileUpload = bucket.file(fileName);
-
-      await fileUpload.save(file.buffer, {
-        metadata: { contentType: file.mimetype },
-        public: true, // Needs Storage rules adjustment if using standard buckets
-      });
-
-      // Get public URL depending on bucket configs or use standard format:
-      fileUrl = `https://storage.googleapis.com/${bucket.name}/${fileName}`;
+      fileUrl = `/uploads/${file.filename}`;
     }
 
-    const postRef = topicRef.collection('posts').doc();
-    const newPost = {
-      id: postRef.id,
+    const newPost = await Post.create({
+      topicId,
       content: content || '',
-      fileUrl: fileUrl,
-      authorId: authorId,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      upvotes: 0,
-      downvotes: 0,
-      score: 0
-    };
+      fileUrl,
+      authorId
+    });
 
-    await postRef.set(newPost);
-
-    // Filter author
-    const { authorId: _, ...publicPost } = newPost;
+    const publicPost = newPost.toObject();
+    delete publicPost.authorId;
     publicPost.authorName = 'Anonymous';
 
     res.status(201).json({ message: 'Post created', data: publicPost });
@@ -60,42 +39,29 @@ const createPost = async (req, res, next) => {
   }
 };
 
-/**
- * Controller: Get Posts inside a Topic
- */
 const getPosts = async (req, res, next) => {
   try {
     const { topicId } = req.params;
-    const { sort } = req.query; // e.g. 'latest', 'most-vote'
+    const { sort } = req.query; // 'latest', 'most-vote'
 
-    const topicRef = db.collection('topics').doc(topicId);
-    let postsQuery = topicRef.collection('posts');
-
+    let sortOption = { createdAt: -1 };
     if (sort === 'most-vote') {
-      postsQuery = postsQuery.orderBy('score', 'desc');
-    } else {
-      postsQuery = postsQuery.orderBy('createdAt', 'desc');
+      sortOption = { score: -1 };
     }
 
-    const snapshot = await postsQuery.get();
+    const posts = await Post.find({ topicId }).sort(sortOption).lean();
 
-    const posts = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      const { authorId, ...safeData } = data;
-      posts.push({ ...safeData, authorName: 'Anonymous' });
+    const publicPosts = posts.map(post => {
+      delete post.authorId;
+      return { ...post, authorName: 'Anonymous' };
     });
 
-    res.status(200).json({ data: posts });
+    res.status(200).json({ data: publicPosts });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * Controller: Toggle Vote on a target
- * Expecting params: req.body.targetId (the topic or post), req.body.type ('topic' or 'post'), req.body.vote (1 for up, -1 for down)
- */
 const toggleVote = async (req, res, next) => {
   try {
     const { targetId, targetType, vote } = req.body;
@@ -105,59 +71,42 @@ const toggleVote = async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid vote parameters.' });
     }
 
-    let targetRef;
-    if (targetType === 'topic') {
-      targetRef = db.collection('topics').doc(targetId);
-    } else if (targetType === 'post') {
-      // Need topicId for posts if we are nested!
-      // To simplify voting on Posts, the targetId might be 'topics/{tId}/posts/{pId}' explicitly or passed via param
-      const { topicId } = req.body; 
-      if (!topicId) return res.status(400).json({ error: 'topicId required to vote on posts' });
-      targetRef = db.collection('topics').doc(topicId).collection('posts').doc(targetId);
+    const Model = targetType === 'topic' ? Topic : targetType === 'post' ? Post : null;
+    if (!Model) return res.status(400).json({ error: 'targetType must be topic or post' });
+    
+    const targetModelStr = targetType === 'topic' ? 'Topic' : 'Post';
+
+    const targetDoc = await Model.findById(targetId);
+    if (!targetDoc) return res.status(404).json({ error: 'Target not found' });
+
+    const existingVote = await Vote.findOne({ targetId, targetModel: targetModelStr, authorId });
+    const currentVoteVal = existingVote ? existingVote.value : 0;
+
+    let upvoteDelta = 0;
+    let downvoteDelta = 0;
+
+    if (currentVoteVal === 1) upvoteDelta -= 1;
+    if (currentVoteVal === -1) downvoteDelta -= 1;
+
+    if (vote === 1) upvoteDelta += 1;
+    if (vote === -1) downvoteDelta += 1;
+
+    targetDoc.upvotes += upvoteDelta;
+    targetDoc.downvotes += downvoteDelta;
+    targetDoc.score = targetDoc.upvotes - targetDoc.downvotes;
+    
+    await targetDoc.save();
+
+    if (vote === 0) {
+      if (existingVote) await Vote.findByIdAndDelete(existingVote._id);
     } else {
-      return res.status(400).json({ error: 'targetType must be topic or post' });
-    }
-
-    const voteRef = targetRef.collection('votes').doc(authorId);
-
-    await db.runTransaction(async (t) => {
-      const voteDoc = await t.get(voteRef);
-      const targetDoc = await t.get(targetRef);
-
-      if (!targetDoc.exists) throw new Error('Target document does not exist.');
-
-      const currentVote = voteDoc.exists ? voteDoc.data().value : 0;
-      
-      // Calculate diffs
-      let upvoteDelta = 0;
-      let downvoteDelta = 0;
-      
-      // remove old vote
-      if (currentVote === 1) upvoteDelta -= 1;
-      if (currentVote === -1) downvoteDelta -= 1;
-      
-      // add new vote
-      if (vote === 1) upvoteDelta += 1;
-      if (vote === -1) downvoteDelta += 1;
-
-      // New values
-      const currentStats = targetDoc.data();
-      const newUpvotes = (currentStats.upvotes || 0) + upvoteDelta;
-      const newDownvotes = (currentStats.downvotes || 0) + downvoteDelta;
-      const newScore = newUpvotes - newDownvotes;
-
-      t.update(targetRef, {
-        upvotes: newUpvotes,
-        downvotes: newDownvotes,
-        score: newScore
-      });
-
-      if (vote === 0) {
-         t.delete(voteRef); // Withdrawing vote
+      if (existingVote) {
+        existingVote.value = vote;
+        await existingVote.save();
       } else {
-         t.set(voteRef, { value: vote, timestamp: admin.firestore.FieldValue.serverTimestamp() });
+        await Vote.create({ targetId, targetModel: targetModelStr, authorId, value: vote });
       }
-    });
+    }
 
     res.status(200).json({ message: 'Vote recorded' });
   } catch (error) {

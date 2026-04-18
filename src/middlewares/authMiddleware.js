@@ -1,9 +1,6 @@
 const jwt = require('jsonwebtoken');
-const { db } = require('../config/firebase');
+const User = require('../models/User');
 
-/**
- * Middleware to verify custom JWT token and DB session
- */
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -19,18 +16,15 @@ const verifyToken = async (req, res, next) => {
       throw new Error('Invalid token payload: Missing UID');
     }
 
-    // Verify token against database currentJwt
-    const userDoc = await db.collection('users').doc(uid).get();
-    if (!userDoc.exists) {
+    const userData = await User.findOne({ uid });
+    if (!userData) {
       throw new Error('User not found');
     }
 
-    const userData = userDoc.data();
     if (userData.currentJwt !== token) {
       return res.status(401).json({ error: 'INVALID_SESSION: Token superseded' });
     }
 
-    // Populate req.user
     req.user = { uid: uid };
     next();
   } catch (error) {
